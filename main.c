@@ -9,6 +9,7 @@
 /* time, CLOCKS_PER_SEC */
 #include <time.h>
 #include <mpi.h>
+#include <memory.h>
 
 #define ROWMJR(R, C, NR, NC) (R*NC+C)
 #define COLMJR(R, C, NR, NC) (C*NR+R)
@@ -21,6 +22,7 @@
 #define SEND_ELEMNTS_TAG 2
 #define SEND_WEIGHT_TAG 3
 #define SEND_COUNTS_TAG 4
+#define SEND_RESULT_TAG 5
 
 static void calculateDispls(int ** displs, int ** localNumOfElements, int numberOfProcessors, int size){
     int local, reminder;
@@ -132,15 +134,16 @@ dijkstra(
         int const source,
         int const n,
         float const *const a,
-        float **const result
+        float **const result, int rank, int * displs, int * localNumOfElements, int numberOfProcessors
 ) {
-    int i, j;
+    int i, j, k, sourceNode = 0;
     struct float_int {
         float distance;
         int u;
     } min;
-    char *set;
-    float *resultVector;
+    char *set = NULL;
+    float *resultVector = NULL;
+    float * localResult = NULL;
 
     //Simple hash set to record which vertex has already been visited(with fixed min distance).
     //0 stands for not visited. Other values stands for visited.
@@ -151,12 +154,25 @@ dijkstra(
     resultVector = malloc(n * sizeof(*resultVector));
     assert(resultVector);
 
-    //TODO potentially read the data from other node. Since the source vertex can be stored in other nodes rather than main node.
-    //The initial result distance is what currently the distance between source to each vertex.
-    for (i = 0; i < n; ++i) {
-        resultVector[i] = a(source, i);
-    }
+    localResult = malloc(n * sizeof(*resultVector));
+    assert(localResult);
 
+    for (i = 0; i < numberOfProcessors; i++){
+        if (source < displs[i]){
+            sourceNode = i - 1;
+            break;
+        }
+    }
+    printf("Source Node: %d.\n", sourceNode);//TODO debug use
+    //The initial result distance is what currently the distance between source to each vertex.
+    if (rank == sourceNode) {//Copy and prepare for broad cast.
+        for (i = 0; i < n; ++i) {
+            resultVector[i] = a[i + n * (source - displs[sourceNode])];
+            printf("%.1f\t", resultVector[i]);//TODO debug use
+        }
+    }
+    MPI_Bcast(resultVector, n, MPI_FLOAT, sourceNode, MPI_COMM_WORLD);
+    MPI_Barrier(MPI_COMM_WORLD);
     //We don't have to visit source vertex.
     //Such that the distance from source to source is defined in the graph_matrix[source, source].
     set[source] = 1;
@@ -165,23 +181,30 @@ dijkstra(
     //Iterate through each vertex.
     for (i = 1; i < n; ++i) {
         min.distance = INFINITY;
-
         //Find local minimum vertex in order to do relax operation(update min distance to each vertex that vertex connected with).
-        // Done in the node which holds the result vector.
         for (j = 0; j < n; ++j) {
             if (!set[j] && resultVector[j] < min.distance) {
                 min.distance = resultVector[j];
                 min.u = j;
             }
+            localResult[j] = resultVector[j];
         }
-
+        printf("vertex %d is chosen. Distance is: %.1f\n", min.u, min.distance);//TODO debug use
         set[min.u] = 1;
-
-        //
-        for (j = 0; j < n; ++j) {
-            if (!set[j] && min.distance + a(min.u, j) < resultVector[j])
-                resultVector[j] = min.distance + a(min.u, j);
+        for (j = 0; j < n; j++){
+            if (set[j]){
+                continue;
+            }
+            for (k = 0; k < localNumOfElements[rank]; k++){
+                if (a(k, j) + min.distance < localResult[j]){
+                    localResult[j] = a(k, j) + min.distance;
+                }
+            }
+            printf("Vertex %d: Local min is: %.1f\n", j, localResult[j]);
         }
+
+        MPI_Allreduce(localResult, resultVector, n, MPI_FLOAT, MPI_MIN, MPI_COMM_WORLD);
+        MPI_Barrier(MPI_COMM_WORLD);
     }
 
     free(set);
@@ -234,20 +257,23 @@ main(int argc, char **argv) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
     load(argv[1], &n, &a, numberOfProcessors, &displs, &localNumOfElements, rank);
+    /* Debug load function use
     char fileName[50];
     sprintf(fileName, "output%d", rank);
     print_numbers(fileName, *(localNumOfElements + rank) * n, a);
-//    MPI_Barrier(MPI_COMM_WORLD);
-//    ts = MPI_Wtime();
-//    dijkstra(atoi(argv[2]), n, a, &result);
-//    te = MPI_Wtime();
-//
-//    //print_time((te - ts) / CLOCKS_PER_SEC);
-//    print_time(te - ts);
-//    print_numbers(argv[3], n, result);
+     */
+    MPI_Barrier(MPI_COMM_WORLD);
+    ts = MPI_Wtime();
+    dijkstra(atoi(argv[2]), n, a, &result, rank, displs, localNumOfElements, numberOfProcessors);
+    te = MPI_Wtime();
 
+    //print_time((te - ts) / CLOCKS_PER_SEC);
+    if (rank == MAIN_PROCESS) {
+        print_time(te - ts);
+        print_numbers(argv[3], n, result);
+    }
     free(a);
-    //free(result);
+    free(result);
     MPI_Finalize();
     return EXIT_SUCCESS;
 }
