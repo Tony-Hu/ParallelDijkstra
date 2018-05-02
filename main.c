@@ -191,16 +191,14 @@ dijkstra(
         }
         printf("vertex %d is chosen. Distance is: %.1f\n", min.u, min.distance);//TODO debug use
         set[min.u] = 1;
-        for (j = 0; j < n; j++){
-            if (set[j]){
+        for (j = 0; j < localNumOfElements[rank]; j++){
+            if (set[j + displs[rank]]){
                 continue;
             }
-            for (k = 0; k < localNumOfElements[rank]; k++){
-                if (a(k, j) + min.distance < localResult[j]){
-                    localResult[j] = a(k, j) + min.distance;
-                }
+            if (a(j, min.u) + min.distance < localResult[j + displs[rank]]){
+                localResult[j + displs[rank]] = a(j, min.u) + min.distance;
             }
-            printf("Vertex %d: Local min is: %.1f\n", j, localResult[j]);
+            printf("Vertex %d: Local min is: %.1f\n", j, localResult[j + displs[rank]]);
         }
 
         MPI_Allreduce(localResult, resultVector, n, MPI_FLOAT, MPI_MIN, MPI_COMM_WORLD);
